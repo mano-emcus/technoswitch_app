@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:usb_serial/usb_serial.dart';
 import 'services/usb_serial_service.dart';
+import 'services/techno_switch_protocol.dart';
 
 void main() {
   runApp(const MyApp());
@@ -36,11 +37,24 @@ class _MyHomePageState extends State<MyHomePage> {
   List<UsbDevice> _devices = [];
   UsbDevice? _selectedDevice;
   String _status = 'Disconnected';
+  String _lastResponse = '';
+  bool _forceRhino103 = false;
+  
+  // Protocol settings
+  final _masterAddressController = TextEditingController(text: '1');
+  final _slaveAddressController = TextEditingController(text: '2');
 
   @override
   void initState() {
     super.initState();
     _checkPermission();
+  }
+
+  @override
+  void dispose() {
+    _masterAddressController.dispose();
+    _slaveAddressController.dispose();
+    super.dispose();
   }
 
   Future<void> _checkPermission() async {
@@ -64,10 +78,34 @@ class _MyHomePageState extends State<MyHomePage> {
   Future<void> _connect() async {
     if (_selectedDevice == null) return;
 
-    final success = await _serialService.connect(_selectedDevice!);
+    // Parse addresses
+    int? masterAddress;
+    int? slaveAddress;
+    try {
+      masterAddress = int.parse(_masterAddressController.text);
+      slaveAddress = int.parse(_slaveAddressController.text);
+      if (masterAddress < 0 || masterAddress > 255 || 
+          slaveAddress < 0 || slaveAddress > 255) {
+        setState(() {
+          _status = 'Invalid address (must be 0-255)';
+        });
+        return;
+      }
+    } catch (e) {
+      setState(() {
+        _status = 'Invalid address format';
+      });
+      return;
+    }
+
+    final success = await _serialService.connect(
+      _selectedDevice!,
+      masterAddress: masterAddress,
+      slaveAddress: slaveAddress,
+    );
+    
     setState(() {
-      _status =
-          success
+      _status = success
               ? 'Connected to ${_selectedDevice!.deviceId}'
               : 'Connection failed';
     });
@@ -81,61 +119,41 @@ class _MyHomePageState extends State<MyHomePage> {
     });
   }
 
-  Future<void> _sendTestMessage() async {
-    // Simple test message - just send a status request
-    final testMessage = [
-      0x02, // STX
-      0x01, // Length (1 byte of data)
-      0x53, // 'S' for Status request
-      0x03, // ETX
-    ];
-
-    // Try to get response
-    final response = await _serialService.sendWithResponse(testMessage);
-
+  Future<void> _sendModuleIdRequest() async {
+    final response = await _serialService.sendCommand([TechnoSwitchProtocol.CMD_MODULE_ID]);
     setState(() {
       if (response != null) {
-        _status = 'Message sent and response received';
+        final data = _serialService.protocol?.extractData(response);
+        _lastResponse = data != null 
+            ? 'Module ID: ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}'
+            : 'Invalid response format';
       } else {
-        _status = 'No response received';
+        _lastResponse = 'No response received';
       }
     });
   }
 
-  Future<void> _sendStatusRequest() async {
-    final statusMessage = [
-      0x02, // STX
-      0x01, // Length
-      0x53, // 'S' Status request
-      0x03, // ETX
-    ];
-
-    final response = await _serialService.sendWithResponse(statusMessage);
+  Future<void> _sendModulePollRequest() async {
+    final response = await _serialService.sendCommand([TechnoSwitchProtocol.CMD_MODULE_POLL]);
     setState(() {
       if (response != null) {
-        _status = 'Status request sent - Check debug console';
+        final data = _serialService.protocol?.extractData(response);
+        _lastResponse = data != null 
+            ? 'Module Status: ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}'
+            : 'Invalid response format';
       } else {
-        _status = 'Status request failed';
+        _lastResponse = 'No response received';
       }
     });
   }
 
-  Future<void> _sendVersionRequest() async {
-    final versionMessage = [
-      0x02, // STX
-      0x01, // Length
-      0x56, // 'V' Version request
-      0x03, // ETX
-    ];
-
-    final response = await _serialService.sendWithResponse(versionMessage);
-    setState(() {
-      if (response != null) {
-        _status = 'Version request sent - Check debug console';
-      } else {
-        _status = 'Version request failed';
-      }
-    });
+  void _toggleForceRhino103(bool? value) {
+    if (value != null) {
+      setState(() {
+        _forceRhino103 = value;
+        _serialService.setForceRhino103(value);
+      });
+    }
   }
 
   @override
@@ -145,7 +163,7 @@ class _MyHomePageState extends State<MyHomePage> {
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: Text(widget.title),
       ),
-      body: Padding(
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -156,9 +174,19 @@ class _MyHomePageState extends State<MyHomePage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Status: $_status',
-                      style: Theme.of(context).textTheme.titleMedium,
+                    const Text(
+                      'Device Connection',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    SwitchListTile(
+                      title: const Text('Force RHINO103 Mode'),
+                      subtitle: const Text('Use this if device reports as RHINO203 but is actually RHINO103'),
+                      value: _forceRhino103,
+                      onChanged: _toggleForceRhino103,
                     ),
                     const SizedBox(height: 16),
                     Row(
@@ -167,8 +195,7 @@ class _MyHomePageState extends State<MyHomePage> {
                           child: DropdownButton<UsbDevice>(
                             hint: const Text('Select Device'),
                             value: _selectedDevice,
-                            items:
-                                _devices.map((device) {
+                            items: _devices.map((device) {
                                   return DropdownMenuItem<UsbDevice>(
                                     value: device,
                                     child: Text(
@@ -190,55 +217,112 @@ class _MyHomePageState extends State<MyHomePage> {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _masterAddressController,
+                            decoration: const InputDecoration(
+                              labelText: 'Master Address (0-255)',
+                              border: OutlineInputBorder(),
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: TextField(
+                            controller: _slaveAddressController,
+                            decoration: const InputDecoration(
+                              labelText: 'Slave Address (0-255)',
+                              border: OutlineInputBorder(),
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),
             ),
             const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed:
-                  _selectedDevice == null
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Connection Status',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(_status),
+                    if (_lastResponse.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      const Divider(),
+                      const SizedBox(height: 8),
+                      Text('Last Response: $_lastResponse'),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Device Commands',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: _selectedDevice == null 
                       ? null
                       : (_serialService.isConnected ? _disconnect : _connect),
               child: Text(
                 _serialService.isConnected ? 'Disconnect' : 'Connect',
               ),
             ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: _serialService.isConnected ? _sendTestMessage : null,
-              child: const Text('Send Test Message'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: _serialService.isConnected ? _sendModuleIdRequest : null,
+                            child: const Text('Get Module ID'),
+                          ),
             ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: _serialService.isConnected ? _sendStatusRequest : null,
-              child: const Text('Send Status Request'),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: _serialService.isConnected ? _sendModulePollRequest : null,
+                            child: const Text('Poll Module'),
             ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed:
-                  _serialService.isConnected ? _sendVersionRequest : null,
-              child: const Text('Send Version Request'),
-            ),
-            const SizedBox(height: 16),
-
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () {
-                if (_selectedDevice != null) {
-                  setState(() {
-                    _status = '''
-Device Info:
-VID: ${_selectedDevice!.vid}
-PID: ${_selectedDevice!.pid}
-Product Name: ${_selectedDevice!.productName ?? 'Unknown'}
-Manufacturer: ${_selectedDevice!.manufacturerName ?? 'Unknown'}
-Serial: ${_selectedDevice!.serial ?? 'Unknown'}
-''';
-                  });
-                }
-              },
-              child: const Text('Show Device Info'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
