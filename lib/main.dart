@@ -1,326 +1,402 @@
+import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:usb_serial/usb_serial.dart';
-import 'services/usb_serial_service.dart';
-import 'services/techno_switch_protocol.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(MyApp());
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'TechnoSwitch App',
+      title: 'Device Communication Demo',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
+        primarySwatch: Colors.blue,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
       ),
-      home: const MyHomePage(title: 'TechnoSwitch Connection'),
+      home: DeviceCommunicationScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-  final String title;
-
+class DeviceCommunicationScreen extends StatefulWidget {
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  _DeviceCommunicationScreenState createState() => _DeviceCommunicationScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  final UsbSerialService _serialService = UsbSerialService();
+class _DeviceCommunicationScreenState extends State<DeviceCommunicationScreen> {
+  // USB Serial connection objects
+  UsbPort? _port;
   List<UsbDevice> _devices = [];
-  UsbDevice? _selectedDevice;
-  String _status = 'Disconnected';
-  String _lastResponse = '';
-  bool _forceRhino103 = false;
+  StreamSubscription<Uint8List>? _subscription;
   
-  // Protocol settings
-  final _masterAddressController = TextEditingController(text: '1');
-  final _slaveAddressController = TextEditingController(text: '2');
-
+  // Control variables
+  bool _isConnected = false;
+  String _status = "Disconnected";
+  String _receivedData = "";
+  
+  // Define the TX packet (MODULE_GENERAL_STATUS command)
+  final Uint8List _txPacket = Uint8List.fromList([
+    0xFE, // SOT (Start of Transmission)
+    0x01, // DES (Destination)
+    0x00, // ORI (Origin)
+    0x04, // TYP (Type) - MODULE_GENERAL_STATUS
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0xB1, 0x4A, 0xFD  // EOT (End of Transmission)
+  ]);
+  
+  // Packet format constants
+  final int _packetStartByte = 0xFE;
+  final int _packetEndByte = 0xFD;
+  
   @override
   void initState() {
     super.initState();
-    _checkPermission();
+    _initUsbSerial();
   }
-
+  
   @override
   void dispose() {
-    _masterAddressController.dispose();
-    _slaveAddressController.dispose();
+    _disconnect();
     super.dispose();
   }
-
-  Future<void> _checkPermission() async {
-    var status = await Permission.storage.status;
-    if (!status.isGranted) {
-      await Permission.storage.request();
-    }
-    _refreshDevices();
+  
+  // Initialize USB Serial and scan for available devices
+  Future<void> _initUsbSerial() async {
+    UsbSerial.usbEventStream?.listen((UsbEvent event) {
+      print("USB Event: ${event.event}, device: ${event.device?.productName}");
+      _refreshDeviceList();
+    });
+    
+    await _refreshDeviceList();
   }
-
-  Future<void> _refreshDevices() async {
-    final devices = await _serialService.getAvailablePorts();
+  
+  // Refresh the list of available USB devices
+  Future<void> _refreshDeviceList() async {
+    List<UsbDevice> devices = await UsbSerial.listDevices();
+    print("Found ${devices.length} USB devices");
+    
     setState(() {
       _devices = devices;
       if (_devices.isEmpty) {
-        _status = 'No USB devices found';
+        _status = "No USB devices found";
+      } else {
+        _status = "${_devices.length} USB ${_devices.length == 1 ? 'device' : 'devices'} found";
       }
     });
   }
-
-  Future<void> _connect() async {
-    if (_selectedDevice == null) return;
-
-    // Parse addresses
-    int? masterAddress;
-    int? slaveAddress;
+  
+  // Connect to a USB device
+  Future<void> _connectToDevice(UsbDevice device) async {
+    _disconnect();
+    
+    setState(() {
+      _status = "Connecting to ${device.productName}...";
+    });
+    
     try {
-      masterAddress = int.parse(_masterAddressController.text);
-      slaveAddress = int.parse(_slaveAddressController.text);
-      if (masterAddress < 0 || masterAddress > 255 || 
-          slaveAddress < 0 || slaveAddress > 255) {
+      _port = await device.create();
+      
+      if (_port == null) {
         setState(() {
-          _status = 'Invalid address (must be 0-255)';
+          _status = "Failed to create port for ${device.productName}";
         });
         return;
       }
-    } catch (e) {
+      
+      bool openResult = await _port!.open();
+      if (!openResult) {
+        setState(() {
+          _status = "Failed to open port for ${device.productName}";
+        });
+        return;
+      }
+      
+      // Configure port parameters
+      await _port!.setDTR(true);
+      await _port!.setRTS(true);
+      await _port!.setPortParameters(
+        115200,
+        UsbPort.DATABITS_8,
+        UsbPort.STOPBITS_1,
+        UsbPort.PARITY_NONE,
+      );
+      
+      // Listen for incoming data
+      _subscription = _port!.inputStream!.listen(
+        (Uint8List data) {
+          print("Data received: ${_bytesToHex(data)} (${data.length} bytes)");
+          _onDataReceived(data);
+        },
+        onError: (error) {
+          print("Stream error: $error");
+          setState(() {
+            _status = "Communication error: $error";
+          });
+        },
+        onDone: () {
+          print("Stream closed");
+          setState(() {
+            _status = "Connection closed";
+            _isConnected = false;
+          });
+        },
+      );
+      
       setState(() {
-        _status = 'Invalid address format';
+        _isConnected = true;
+        _status = "Connected to ${device.productName}";
+      });
+      
+    } catch (e) {
+      print("Error connecting to device: $e");
+      setState(() {
+        _status = "Error: ${e.toString()}";
+      });
+    }
+  }
+  
+  // Disconnect from the current device
+  void _disconnect() {
+    if (_subscription != null) {
+      _subscription!.cancel();
+      _subscription = null;
+    }
+    
+    if (_port != null) {
+      _port!.close();
+      _port = null;
+    }
+    
+    setState(() {
+      _isConnected = false;
+      _status = "Disconnected";
+    });
+  }
+  
+  // Send the TX packet to the device
+  Future<void> _sendPacket() async {
+    if (_port == null) {
+      setState(() {
+        _status = "Not connected to any device";
       });
       return;
     }
-
-    final success = await _serialService.connect(
-      _selectedDevice!,
-      masterAddress: masterAddress,
-      slaveAddress: slaveAddress,
-    );
     
-    setState(() {
-      _status = success
-              ? 'Connected to ${_selectedDevice!.deviceId}'
-              : 'Connection failed';
-    });
-  }
-
-  Future<void> _disconnect() async {
-    await _serialService.disconnect();
-    setState(() {
-      _status = 'Disconnected';
-      _selectedDevice = null;
-    });
-  }
-
-  Future<void> _sendModuleIdRequest() async {
-    final response = await _serialService.sendCommand([TechnoSwitchProtocol.CMD_MODULE_ID]);
-    setState(() {
-      if (response != null) {
-        final data = _serialService.protocol?.extractData(response);
-        _lastResponse = data != null 
-            ? 'Module ID: ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}'
-            : 'Invalid response format';
-      } else {
-        _lastResponse = 'No response received';
-      }
-    });
-  }
-
-  Future<void> _sendModulePollRequest() async {
-    final response = await _serialService.sendCommand([TechnoSwitchProtocol.CMD_MODULE_POLL]);
-    setState(() {
-      if (response != null) {
-        final data = _serialService.protocol?.extractData(response);
-        _lastResponse = data != null 
-            ? 'Module Status: ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}'
-            : 'Invalid response format';
-      } else {
-        _lastResponse = 'No response received';
-      }
-    });
-  }
-
-  void _toggleForceRhino103(bool? value) {
-    if (value != null) {
+    try {
+      print("Sending packet: ${_bytesToHex(_txPacket)} (${_txPacket.length} bytes)");
+      await _port!.write(_txPacket);
+      
       setState(() {
-        _forceRhino103 = value;
-        _serialService.setForceRhino103(value);
+        _status = "Sent packet (${_txPacket.length} bytes)";
+      });
+      
+      // Add a slight delay to allow the device to process and respond
+      await Future.delayed(Duration(milliseconds: 500));
+      
+    } catch (e) {
+      print("Error sending packet: $e");
+      setState(() {
+        _status = "Error sending packet: ${e.toString()}";
       });
     }
   }
-
+  
+  // Handle incoming data
+  void _onDataReceived(Uint8List data) {
+    if (data.isEmpty) return;
+    
+    String hexData = _bytesToHex(data);
+    print("Processing received data: $hexData");
+    
+    setState(() {
+      _receivedData = hexData;
+      _status = "Received packet (${data.length} bytes)";
+    });
+    
+    _processPacket(data);
+  }
+  
+  // Process a received packet
+  void _processPacket(Uint8List data) {
+    if (data.length < 4) {
+      print("Packet too small to be valid: ${data.length} bytes");
+      return;
+    }
+    
+    // Look for valid packet patterns
+    for (int i = 0; i < data.length; i++) {
+      if (data[i] == _packetStartByte) {
+        if (i + 3 < data.length) {
+          int endPos = _findEndByte(data, i);
+          if (endPos > i) {
+            _analyzePacket(data.sublist(i, endPos + 1));
+          }
+        }
+      }
+    }
+  }
+  
+  // Find the packet end byte after a given start position
+  int _findEndByte(Uint8List data, int startPos) {
+    for (int i = startPos + 1; i < data.length; i++) {
+      if (data[i] == _packetEndByte) {
+        return i;
+      }
+    }
+    return -1;
+  }
+  
+  // Analyze a complete packet
+  void _analyzePacket(Uint8List packet) {
+    if (packet[0] != _packetStartByte || packet[packet.length - 1] != _packetEndByte) {
+      print("Invalid packet framing");
+      return;
+    }
+    
+    int destination = packet[1];
+    int origin = packet[2];
+    int type = packet[3];
+    
+    print("Packet Analysis:");
+    print("- Start: 0x${packet[0].toRadixString(16).padLeft(2, '0').toUpperCase()}");
+    print("- Destination: 0x${destination.toRadixString(16).padLeft(2, '0').toUpperCase()}");
+    print("- Origin: 0x${origin.toRadixString(16).padLeft(2, '0').toUpperCase()}");
+    print("- Type: 0x${type.toRadixString(16).padLeft(2, '0').toUpperCase()}");
+    print("- End: 0x${packet[packet.length - 1].toRadixString(16).padLeft(2, '0').toUpperCase()}");
+    
+    if (packet.length > 4) {
+      Uint8List data = packet.sublist(4, packet.length - 1);
+      print("- Data: ${_bytesToHex(data)}");
+    }
+  }
+  
+  // Convert bytes to hex string
+  String _bytesToHex(Uint8List data) {
+    return data.map((byte) => byte.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
+  }
+  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: Text(widget.title),
+        title: Text('Device Communication'),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.refresh),
+            onPressed: _refreshDeviceList,
+          ),
+        ],
       ),
-      body: SingleChildScrollView(
+      body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+          children: <Widget>[
+            // Status display
             Card(
               child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Device Connection',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    SwitchListTile(
-                      title: const Text('Force RHINO103 Mode'),
-                      subtitle: const Text('Use this if device reports as RHINO203 but is actually RHINO103'),
-                      value: _forceRhino103,
-                      onChanged: _toggleForceRhino103,
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: DropdownButton<UsbDevice>(
-                            hint: const Text('Select Device'),
-                            value: _selectedDevice,
-                            items: _devices.map((device) {
-                                  return DropdownMenuItem<UsbDevice>(
-                                    value: device,
-                                    child: Text(
-                                      '${device.vid}:${device.pid} (${device.manufacturerName ?? "Unknown"})',
-                                    ),
-                                  );
-                                }).toList(),
-                            onChanged: (device) {
-                              setState(() {
-                                _selectedDevice = device;
-                              });
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                        ElevatedButton(
-                          onPressed: _refreshDevices,
-                          child: const Text('Refresh'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _masterAddressController,
-                            decoration: const InputDecoration(
-                              labelText: 'Master Address (0-255)',
-                              border: OutlineInputBorder(),
-                            ),
-                            keyboardType: TextInputType.number,
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: TextField(
-                            controller: _slaveAddressController,
-                            decoration: const InputDecoration(
-                              labelText: 'Slave Address (0-255)',
-                              border: OutlineInputBorder(),
-                            ),
-                            keyboardType: TextInputType.number,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+                padding: const EdgeInsets.all(8.0),
+                child: Text(
+                  'Status: $_status',
+                  style: TextStyle(fontSize: 16),
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Connection Status',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
+            SizedBox(height: 16),
+            
+            // Device list
+            Expanded(
+              flex: 2,
+              child: _devices.isEmpty
+                  ? Center(child: Text('No USB devices found'))
+                  : ListView.builder(
+                      itemCount: _devices.length,
+                      itemBuilder: (context, index) {
+                        return Card(
+                          child: ListTile(
+                            title: Text(_devices[index].productName ?? 'Unknown Device'),
+                            subtitle: Text(
+                              'VID: ${_devices[index].vid}, PID: ${_devices[index].pid}',
+                            ),
+                            trailing: ElevatedButton(
+                              child: Text(_isConnected ? 'Disconnect' : 'Connect'),
+                              onPressed: _isConnected
+                                  ? () => _disconnect()
+                                  : () => _connectToDevice(_devices[index]),
+                            ),
+                          ),
+                        );
+                      },
                     ),
-                    const SizedBox(height: 8),
-                    Text(_status),
-                    if (_lastResponse.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      const Divider(),
-                      const SizedBox(height: 8),
-                      Text('Last Response: $_lastResponse'),
+            ),
+            
+            // Control buttons
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton(
+                    onPressed: _isConnected ? _sendPacket : null,
+                    child: Text('Send Packet'),
+                    style: ElevatedButton.styleFrom(
+                      padding: EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                    ),
+                  ),
+                  ElevatedButton(
+                    onPressed: _isConnected ? () {
+                      setState(() {
+                        _receivedData = "";
+                      });
+                    } : null,
+                    child: Text('Clear Data'),
+                    style: ElevatedButton.styleFrom(
+                      padding: EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            
+            // Received data display
+            Expanded(
+              flex: 3,
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(8.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Received Data:',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      SizedBox(height: 8),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          child: Text(
+                            _receivedData.isEmpty ? 'No data received yet' : _receivedData,
+                            style: TextStyle(fontFamily: 'monospace'),
+                          ),
+                        ),
+                      ),
                     ],
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Device Commands',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: _selectedDevice == null 
-                      ? null
-                      : (_serialService.isConnected ? _disconnect : _connect),
-              child: Text(
-                _serialService.isConnected ? 'Disconnect' : 'Connect',
-              ),
-            ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: _serialService.isConnected ? _sendModuleIdRequest : null,
-                            child: const Text('Get Module ID'),
-                          ),
-            ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: _serialService.isConnected ? _sendModulePollRequest : null,
-                            child: const Text('Poll Module'),
-            ),
-                        ),
-                      ],
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),
