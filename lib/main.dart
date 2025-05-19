@@ -82,12 +82,59 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _sendTestMessage() async {
-    // Example test message for Technoswitch Oryx 204
-    // You'll need to adjust this based on the actual protocol
-    final testMessage = [0x02, 0x00, 0x01, 0x03]; // STX, Length, Command, ETX
-    final success = await _serialService.sendData(testMessage);
+    // Simple test message - just send a status request
+    final testMessage = [
+      0x02, // STX
+      0x01, // Length (1 byte of data)
+      0x53, // 'S' for Status request
+      0x03, // ETX
+    ];
+
+    // Try to get response
+    final response = await _serialService.sendWithResponse(testMessage);
+
     setState(() {
-      _status = success ? 'Test message sent' : 'Failed to send message';
+      if (response != null) {
+        _status = 'Message sent and response received';
+      } else {
+        _status = 'No response received';
+      }
+    });
+  }
+
+  Future<void> _sendStatusRequest() async {
+    final statusMessage = [
+      0x02, // STX
+      0x01, // Length
+      0x53, // 'S' Status request
+      0x03, // ETX
+    ];
+
+    final response = await _serialService.sendWithResponse(statusMessage);
+    setState(() {
+      if (response != null) {
+        _status = 'Status request sent - Check debug console';
+      } else {
+        _status = 'Status request failed';
+      }
+    });
+  }
+
+  Future<void> _sendVersionRequest() async {
+    final versionMessage = [
+      0x02, // STX
+      0x01, // Length
+      0x56, // 'V' Version request
+      0x03, // ETX
+    ];
+
+    final response = await _serialService.sendWithResponse(versionMessage);
+    setState(() {
+      if (response != null) {
+        _status = 'Version request sent - Check debug console';
+      } else {
+        _status = 'Version request failed';
+      }
     });
   }
 
@@ -161,6 +208,37 @@ class _MyHomePageState extends State<MyHomePage> {
             ElevatedButton(
               onPressed: _serialService.isConnected ? _sendTestMessage : null,
               child: const Text('Send Test Message'),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: _serialService.isConnected ? _sendStatusRequest : null,
+              child: const Text('Send Status Request'),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed:
+                  _serialService.isConnected ? _sendVersionRequest : null,
+              child: const Text('Send Version Request'),
+            ),
+            const SizedBox(height: 16),
+
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: () {
+                if (_selectedDevice != null) {
+                  setState(() {
+                    _status = '''
+Device Info:
+VID: ${_selectedDevice!.vid}
+PID: ${_selectedDevice!.pid}
+Product Name: ${_selectedDevice!.productName ?? 'Unknown'}
+Manufacturer: ${_selectedDevice!.manufacturerName ?? 'Unknown'}
+Serial: ${_selectedDevice!.serial ?? 'Unknown'}
+''';
+                  });
+                }
+              },
+              child: const Text('Show Device Info'),
             ),
           ],
         ),
